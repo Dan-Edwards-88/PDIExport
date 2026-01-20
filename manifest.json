@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "PDI Trips Exporter",
+  "version": "1.0.0",
+  "permissions": ["storage", "downloads"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "host_permissions": [
+    "https://plc-mt.logistics.pdisoftware.com/*",
+    "https://svc-scheduling.logistics.pdisoftware.com/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://plc-mt.logistics.pdisoftware.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page_hook.js"],
+      "matches": ["https://plc-mt.logistics.pdisoftware.com/*"]
+    }
+  ]
+}
