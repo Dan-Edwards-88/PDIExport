@@ -296,7 +296,33 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
 
     const unitItems = Array.isArray(detail?.unit?.units) ? detail.unit.units : [];
     const tractor = unitItems.find(u => String(u?.unitType || "").toLowerCase().includes("tractor")) || {};
-    const trailerUnit = unitItems.find(u => String(u?.unitType || "").toLowerCase().includes("trailer")) || {};
+    
+    // Collect ALL trailers (there can be multiple: A-Trailer, Semi-trailer, etc.)
+    const trailerUnits = unitItems.filter(u => String(u?.unitType || "").toLowerCase().includes("trailer"));
+    const trailerUnit = trailerUnits[0] || {};
+    
+    // Build a map of trailers by ID for compartment-level lookup
+    const trailerById = new Map();
+    for (const tu of trailerUnits) {
+      if (tu?.id != null) trailerById.set(String(tu.id), tu);
+    }
+    
+    // Build maps for trailer lookup by compartment or unit
+    const trailerByNumber = new Map();
+    for (const tu of trailerUnits) {
+      if (tu?.number != null) trailerByNumber.set(String(tu.number), tu);
+    }
+
+    // Map unitCompartmentId -> trailer number (from physical compartments)
+    const compartmentIdToTrailerNumber = new Map();
+    for (const tl of tripLoads) {
+      const trailer = tl?.trailer || {};
+      for (const pc of (Array.isArray(trailer?.compartments) ? trailer.compartments : [])) {
+        if (pc?.id != null && pc?.unitNumber != null) {
+          compartmentIdToTrailerNumber.set(String(pc.id), String(pc.unitNumber));
+        }
+      }
+    }
 
     const orders = Array.isArray(detail?.orders) ? detail.orders : [];
     for (const o of orders) {
@@ -306,10 +332,28 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
         (o?.customerId != null ? deliveryByCustomer.get(String(o.customerId)) : undefined);
 
       const evDetail = ev?.id != null ? deliveryDetailByEventId.get(String(ev.id)) : undefined;
-      const eventStart = evDetail?.actualStart || evDetail?.plannedStart || ev?.start || detail?.start || t?.start || "";
-      const eventEnd = evDetail?.actualEnd || evDetail?.plannedEnd || ev?.end || detail?.end || t?.end || "";
-      const deliveryDate = formatDateOnly(eventStart);
-      const amPm = formatAmPm(eventStart);
+      const tripStart = t?.start || "";
+      const tripEnd = t?.end || "";
+      const tripEventStart = Array.isArray(t?.events) ? t.events?.[0]?.start : "";
+      const tripEventEnd = Array.isArray(t?.events) ? t.events?.[0]?.end : "";
+      const eventStart =
+        tripEventStart ||
+        evDetail?.actualStart ||
+        evDetail?.plannedStart ||
+        ev?.start ||
+        detail?.start ||
+        tripStart ||
+        "";
+      const eventEnd =
+        tripEventEnd ||
+        evDetail?.actualEnd ||
+        evDetail?.plannedEnd ||
+        ev?.end ||
+        detail?.end ||
+        tripEnd ||
+        "";
+      const deliveryDate = formatDateOnly(tripStart || eventStart);
+      const amPm = formatAmPm(tripStart || eventStart);
       const deliveryOrder = tripOrderById.get(String(t?.id ?? t?.tripId ?? "")) ?? "";
 
       const positions = Array.isArray(o?.orderPositions) ? o.orderPositions : [];
@@ -325,13 +369,32 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
           ? `${tripLoad?.name ?? ""}${tripLoad?.loadingPointId != null ? ` (${tripLoad.loadingPointId})` : ""}`.trim()
           : "";
 
-        const loadId = evDetail?.loadIDs ?? tripLoad?.id ?? "";
-        const trailerId = tripLoad?.trailer?.number ?? tripLoad?.trailer?.id ?? trailerUnit?.number ?? trailerUnit?.id ?? "";
+        const loadId = evDetail?.loadIDs ?? "";
 
         for (const c of comps) {
           const productName =
             p?.articleName ||
             productsById.get(String(p?.productId ?? "")) ||
+            "";
+
+          // Determine the specific trailer for this compartment
+          let compTrailer = null;
+          if (c?.unitId != null) {
+            compTrailer = trailerById.get(String(c.unitId)) || null;
+          }
+
+          if (!compTrailer && c?.unitCompartmentId != null) {
+            const trailerNumber = compartmentIdToTrailerNumber.get(String(c.unitCompartmentId));
+            if (trailerNumber) compTrailer = trailerByNumber.get(String(trailerNumber)) || null;
+          }
+
+          const trailerId =
+            compTrailer?.number ??
+            compTrailer?.id ??
+            tripLoad?.trailer?.number ??
+            tripLoad?.trailer?.id ??
+            trailerUnit?.number ??
+            trailerUnit?.id ??
             "";
 
           deliveryRows.push({
@@ -350,7 +413,9 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
             customerAddress: formatAddress(evDetail) || o?.address || o?.street || o?.zip || "",
             truckId: tractor?.number ?? tractor?.id ?? "",
             trailerId,
-            compartmentNumber: c?.compartmentNumber ?? ""
+            compartmentNumber: c?.compartmentNumber ?? "",
+            preloadForNextShift: t?.preloadForNextShift ?? false,
+            preloadInPreviousShift: t?.preloadInPreviousShift ?? false
           });
         }
       }
@@ -359,8 +424,6 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
     // TripLoad compartments (actual load plan compartments)
     for (const tl of tripLoads) {
       const trailer = tl?.trailer || {};
-      const trailerNumber = trailer?.number ?? "";
-      const trailerPlate = trailer?.licencePlate ?? "";
 
       // Map physical compartment info by unitCompartmentId
       const physById = new Map();
@@ -373,13 +436,31 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
         const productId = c?.productId ?? "";
         const productName = productsById.get(productId) || "";
 
+        // Determine the correct trailer for this compartment
+        // Use unitId from compartment, or unitNumber from physical compartment to find the right trailer
+        const compartmentUnitId = c?.unitId ?? "";
+        const compartmentUnitNumber = phys?.unitNumber ?? "";
+        
+        // Try to find the specific trailer for this compartment
+        let compTrailer = compartmentUnitId ? trailerById.get(String(compartmentUnitId)) : null;
+        if (!compTrailer && compartmentUnitNumber) {
+          // Find trailer by number if unitId lookup failed
+          compTrailer = trailerUnits.find(tu => String(tu?.number) === String(compartmentUnitNumber));
+        }
+        // Fall back to the tripLoad trailer or first trailer unit
+        compTrailer = compTrailer || trailer || trailerUnit || {};
+
+        const trailerNumber = compTrailer?.number ?? trailer?.number ?? "";
+        const trailerPlate = compTrailer?.licencePlate ?? trailer?.licencePlate ?? "";
+        const trailerId = compTrailer?.id ?? trailer?.id ?? "";
+
         tripCompartmentRows.push({
           tripId: detail?.tripId ?? t?.id ?? "",
           tripReferenceNumber: detail?.referenceNumber ?? t?.reference ?? "",
           loadingPointId: tl?.loadingPointId ?? "",
           loadingPointName: tl?.name ?? "",
 
-          trailerId: trailer?.id ?? "",
+          trailerId,
           trailerNumber,
           trailerPlate,
 
@@ -451,7 +532,17 @@ function formatDateOnly(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toISOString().slice(0, 10);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function shiftNumberToAmPm(value) {
+  const n = Number(value);
+  if (n === 1) return "AM";
+  if (n === 2) return "PM";
+  return value ?? "";
 }
 
 function formatAmPm(iso) {
@@ -586,14 +677,16 @@ function flattenUnitCombination(u) {
 }
 
 function flattenDriver(d) {
+  const startDate = formatDateOnly(d?.start) || d?.start || "";
+  const endDate = formatDateOnly(d?.end) || d?.end || "";
   return {
     driverId: d?.id ?? "",
     name: d?.name ?? "",
     fullName: d?.fullName ?? "",
     scheduleEventId: d?.scheduleEventID ?? "",
-    shiftNumber: d?.shiftNumber ?? "",
-    start: d?.start ?? "",
-    end: d?.end ?? "",
+    shiftNumber: shiftNumberToAmPm(d?.shiftNumber),
+    start: startDate,
+    end: endDate,
     shiftLockedByDA: d?.shiftLockedByDA ?? false
   };
 }

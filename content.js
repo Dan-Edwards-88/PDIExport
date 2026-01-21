@@ -126,6 +126,11 @@
         const { start, end } = getDateRangeFromToolbar();
         if (!start || !end) {
           showStatus(wrapper, "Select a valid start and end date (unambiguous format).", "error");
+          btn.innerHTML = "<i class=\"fa fa-exclamation-triangle\"></i>";
+          setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            btn.disabled = false;
+          }, 1200);
           return;
         }
 
@@ -137,7 +142,10 @@
           payload: { profileId, start, end, language: "en" }
         });
 
-        if (!resp?.ok) throw new Error(resp?.error || "Export failed");
+        if (!resp) {
+          throw new Error("No response from background script - extension may need to be reloaded");
+        }
+        if (!resp.ok) throw new Error(resp.error || "Export failed");
         btn.innerHTML = "<i class=\"fa fa-check\"></i>";
         setTimeout(() => {
           btn.innerHTML = originalHtml;
@@ -151,16 +159,6 @@
           btn.disabled = false;
         }, 1200);
         showStatus(wrapper, `Export error: ${e?.message || e}`, "error");
-        return;
-      } finally {
-        if (btn.disabled) {
-          setTimeout(() => {
-            if (btn.disabled) {
-              btn.innerHTML = originalHtml;
-              btn.disabled = false;
-            }
-          }, 30000);
-        }
       }
     });
 
