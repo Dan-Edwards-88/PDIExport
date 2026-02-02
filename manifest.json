@@ -1,0 +1,26 @@
+{
+   "background": {
+      "service_worker": "background.js"
+   },
+   "content_scripts": [ {
+      "js": [ "content.js" ],
+      "matches": [ "https://plc-mt.logistics.pdisoftware.com/*" ],
+      "run_at": "document_start"
+   } ],
+   "host_permissions": [ "https://plc-mt.logistics.pdisoftware.com/*", "https://svc-scheduling.logistics.pdisoftware.com/*" ],
+   "icons": {
+      "128": "icons/icon128.png",
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+   },
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqsNxR96PLkj5F1KE3y6km8DqYijPY3d6MZskJocxaNXIAJWPnrASokVy9SeibVEGUOfgumLQF6yVJbbTkBrkruYyeD+Nky3VUHO6txuVu3VNmesyf+bk9wU4SCX8ywJ8JvSs7OmJhZWDtm2ckGlVrDEPg/fpKgG+NstE+oWjEgOXHC2Nq8gdpQRCnW3B9wgaQ9fL/fnWYfu5t6dxQZ7Ax2pDatH25hx7mYp5DeSYj/Y+SfBmzRsG0tXdBJkgqhjgQuTEcEBY2VohnStn2k66lp9243okg6B2M/cr+GdS7BuUbK0qbJ15UrulkeoPvSQoDa+HheJjUUTqyjTV0wvhDwIDAQAB",
+   "manifest_version": 3,
+   "name": "PDI Trips Exporter",
+   "permissions": [ "storage", "downloads" ],
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "1.0.3",
+   "web_accessible_resources": [ {
+      "matches": [ "https://plc-mt.logistics.pdisoftware.com/*" ],
+      "resources": [ "page_hook.js" ]
+   } ]
+}
