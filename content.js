@@ -66,9 +66,24 @@
     return "";
   }
 
+  function findDateInput(selector, fallbackIdPrefix) {
+    const host = document.querySelector(selector);
+    if (host) {
+      const innerInput = host.querySelector("input.k-input-inner, input.k-input");
+      if (innerInput) return innerInput;
+    }
+
+    if (fallbackIdPrefix) {
+      const fallback = document.querySelector(`input[id^="${fallbackIdPrefix}"]`);
+      if (fallback) return fallback;
+    }
+
+    return null;
+  }
+
   function getDateRangeFromToolbar() {
-    const startInput = document.querySelector("kendo-dateinput[kendodaterangestartinput] .k-input");
-    const endInput = document.querySelector("kendo-dateinput[kendodaterangeendinput] .k-input");
+    const startInput = findDateInput("kendo-dateinput[kendodaterangestartinput]", "daterangestart-");
+    const endInput = findDateInput("kendo-dateinput[kendodaterangeendinput]", "daterangeend-");
     const start = parseDateToIso(startInput?.value || "");
     const end = parseDateToIso(endInput?.value || "");
     return { start, end };
