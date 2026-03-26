@@ -36,6 +36,9 @@
     if (!value) return "";
     const raw = value.trim();
 
+    const isoDateMatch = raw.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (isoDateMatch) return isoDateMatch[1];
+
     if (raw.includes("/")) {
       const parts = raw.split("/").map(p => p.trim());
       if (parts.length !== 3) return "";
@@ -64,6 +67,163 @@
     }
 
     return "";
+  }
+
+  function readQueryParams(input) {
+    const params = new URLSearchParams();
+    if (!input) return params;
+
+    const trimmed = String(input).replace(/^#/, "");
+    const queryIndex = trimmed.indexOf("?");
+    if (queryIndex === -1) return params;
+
+    return new URLSearchParams(trimmed.slice(queryIndex + 1));
+  }
+
+  function getUrlState() {
+    const currentUrl = new URL(window.location.href);
+    const pathnameSegments = currentUrl.pathname.split("/").map(s => s.trim()).filter(Boolean);
+    const hashValue = currentUrl.hash || "";
+    const hashWithoutPound = hashValue.replace(/^#/, "");
+    const hashPath = hashWithoutPound.split("?")[0] || "";
+    const hashSegments = hashPath.split("/").map(s => s.trim()).filter(Boolean);
+
+    return {
+      searchParams: currentUrl.searchParams,
+      hashParams: readQueryParams(hashValue),
+      pathnameSegments,
+      hashSegments,
+      allSegments: [...pathnameSegments, ...hashSegments]
+    };
+  }
+
+  function findParamValue(params, keyMatchers) {
+    for (const [key, value] of params.entries()) {
+      const normalisedKey = key.toLowerCase();
+      if (keyMatchers.some(matcher => matcher(normalisedKey))) {
+        const trimmedValue = String(value || "").trim();
+        if (trimmedValue) return trimmedValue;
+      }
+    }
+    return "";
+  }
+
+  function parseProfileIdFromUrl() {
+    const urlState = getUrlState();
+    const exactProfileKeys = ["orderlistprofileid", "profileid"];
+    for (const key of exactProfileKeys) {
+      const exactValue = urlState.searchParams.get(key) || urlState.hashParams.get(key);
+      if (exactValue && /^\d+$/.test(String(exactValue).trim())) {
+        return String(exactValue).trim();
+      }
+    }
+
+    const profileParamMatchers = [
+      key => key === "profile",
+      key => key.endsWith("profileid"),
+      key => key.includes("profile")
+    ];
+
+    const paramCandidate =
+      findParamValue(urlState.searchParams, profileParamMatchers) ||
+      findParamValue(urlState.hashParams, profileParamMatchers);
+
+    if (paramCandidate && /^\d+$/.test(paramCandidate)) return paramCandidate;
+
+    const allSegments = urlState.allSegments;
+    for (let i = 0; i < allSegments.length; i += 1) {
+      const segment = allSegments[i].toLowerCase();
+      const nextSegment = allSegments[i + 1];
+      if (!nextSegment) continue;
+
+      if ((segment === "profile" || segment === "profiles" || segment === "profileid") && /^\d+$/.test(nextSegment)) {
+        return nextSegment;
+      }
+    }
+
+    const numericSegments = allSegments.filter(segment => /^\d+$/.test(segment));
+    return numericSegments.length === 1 ? numericSegments[0] : "";
+  }
+
+  function parseRegionIdFromUrl() {
+    const urlState = getUrlState();
+    const exactRegionKeys = ["regionid", "region", "plantid", "plant"];
+    for (const key of exactRegionKeys) {
+      const exactValue = urlState.searchParams.get(key) || urlState.hashParams.get(key);
+      if (exactValue && /^\d+$/.test(String(exactValue).trim())) {
+        return String(exactValue).trim();
+      }
+    }
+
+    const segmentCollections = [urlState.pathnameSegments, urlState.hashSegments];
+    for (const segments of segmentCollections) {
+      for (let i = 0; i < segments.length; i += 1) {
+        const segment = segments[i].toLowerCase();
+        const nextSegment = segments[i + 1];
+        if (!nextSegment) continue;
+
+        if ((segment === "p" || segment === "region" || segment === "plant") && /^\d+$/.test(nextSegment)) {
+          return nextSegment;
+        }
+      }
+    }
+
+    return "";
+  }
+
+  function parseDateRangeFromUrl() {
+    const urlState = getUrlState();
+    const exactStart = parseDateToIso(urlState.searchParams.get("start") || urlState.hashParams.get("start") || "");
+    const exactEnd = parseDateToIso(urlState.searchParams.get("end") || urlState.hashParams.get("end") || "");
+    if (exactStart && exactEnd) return { start: exactStart, end: exactEnd };
+
+    const startMatchers = [
+      key => key === "startdate",
+      key => key === "datefrom",
+      key => key === "from",
+      key => key.endsWith("start"),
+      key => key.endsWith("startdate")
+    ];
+    const endMatchers = [
+      key => key === "enddate",
+      key => key === "dateto",
+      key => key === "to",
+      key => key.endsWith("end"),
+      key => key.endsWith("enddate")
+    ];
+
+    const start = parseDateToIso(
+      findParamValue(urlState.searchParams, startMatchers) ||
+      findParamValue(urlState.hashParams, startMatchers)
+    );
+    const end = parseDateToIso(
+      findParamValue(urlState.searchParams, endMatchers) ||
+      findParamValue(urlState.hashParams, endMatchers)
+    );
+
+    if (start && end) return { start, end };
+
+    const datedSegments = urlState.allSegments.map(parseDateToIso).filter(Boolean);
+    if (datedSegments.length >= 2) {
+      return {
+        start: datedSegments[0],
+        end: datedSegments[1]
+      };
+    }
+
+    return { start: "", end: "" };
+  }
+
+  function getExportContext() {
+    const urlDates = parseDateRangeFromUrl();
+    const toolbarDates = getDateRangeFromToolbar();
+
+    return {
+      regionId: parseRegionIdFromUrl(),
+      profileId: parseProfileIdFromUrl(),
+      start: urlDates.start || toolbarDates.start,
+      end: urlDates.end || toolbarDates.end
+    };
   }
 
   function findDateInput(selector, fallbackIdPrefix) {
@@ -166,9 +326,9 @@
         window.postMessage({ type: "PDI_CAPTURE_START", windowMs: 60000 }, "*");
         window.postMessage({ type: "PDI_AUTH_REFRESH" }, "*");
 
-        const { start, end } = getDateRangeFromToolbar();
-        if (!start || !end) {
-          showToast("Select a valid start and end date (unambiguous format).", "error");
+        const { regionId, profileId, start, end } = getExportContext();
+        if (!profileId) {
+          showToast("Could not determine the active profile from the current schedule URL.", "error");
           btn.innerHTML = "<i class=\"fa fa-exclamation-triangle\"></i>";
           setTimeout(() => {
             btn.innerHTML = originalHtml;
@@ -177,12 +337,19 @@
           return;
         }
 
-        const { profileId: storedProfileId } = await chrome.storage.local.get(["profileId"]);
-        const profileId = String(storedProfileId || "39");
+        if (!start || !end) {
+          showToast("Could not determine the current date range from the schedule URL or toolbar.", "error");
+          btn.innerHTML = "<i class=\"fa fa-exclamation-triangle\"></i>";
+          setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            btn.disabled = false;
+          }, 1200);
+          return;
+        }
 
         const resp = await chrome.runtime.sendMessage({
           type: "EXPORT_TRIPS",
-          payload: { profileId, start, end, language: "en" }
+          payload: { regionId, profileId, start, end, language: "en" }
         });
 
         if (!resp) {

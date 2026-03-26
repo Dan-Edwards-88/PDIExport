@@ -18,7 +18,7 @@
    "name": "PDI Trips Exporter",
    "permissions": [ "storage", "downloads" ],
    "update_url": "https://clients2.google.com/service/update2/crx",
-   "version": "1.0.4",
+   "version": "1.0.5",
    "web_accessible_resources": [ {
       "matches": [ "https://plc-mt.logistics.pdisoftware.com/*" ],
       "resources": [ "page_hook.js" ]

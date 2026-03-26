@@ -53,7 +53,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       if (msg?.type === "EXPORT_TRIPS") {
-        const { profileId, start, end, language } = msg.payload;
+        const { regionId, profileId, start, end, language } = msg.payload;
         try {
           let pdiAuth = await waitForAuthCapture({ timeoutMs: 15000, pollMs: 500 });
           if (!pdiAuth) {
@@ -74,7 +74,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           }
 
           // 1) Base list
-          const tripsPayload = await apiFetchTrips({ profileId, start, end, language, pdiAuth });
+          const tripsFilterId = String(regionId || profileId || "").trim();
+          if (!tripsFilterId) {
+            throw new Error("No region or profile identifier was provided for the Trips request.");
+          }
+
+          const tripsPayload = await apiFetchTrips({ profileId: tripsFilterId, start, end, language, pdiAuth });
           const tripGroups = Array.isArray(tripsPayload) ? tripsPayload : [tripsPayload];
           const baseTrips = tripGroups.flatMap(g => (Array.isArray(g?.trips) ? g.trips : []));
 
@@ -119,7 +124,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           // 3) Build workbook sheets (base + drilldown sheets)
           const sheets = buildWorkbookSheets(tripGroups, drilldownByTripId, deliveryEventDetails);
 
-          const filename = `pdi_trips_${start}_to_${end}.xlsx`;
+          const filenameParts = ["pdi_trips"];
+          if (regionId) filenameParts.push(`region_${String(regionId).replace(/[^a-zA-Z0-9_-]/g, "_")}`);
+          if (profileId) filenameParts.push(`profile_${String(profileId).replace(/[^a-zA-Z0-9_-]/g, "_")}`);
+          filenameParts.push(`${start}_to_${end}`);
+          const filename = `${filenameParts.join("_")}.xlsx`;
           await downloadWorkbook(sheets.workbook, filename);
 
           sendResponse({
