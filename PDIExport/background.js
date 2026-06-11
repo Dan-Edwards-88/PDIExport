@@ -80,7 +80,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           }
 
           const tripsPayload = await apiFetchTrips({ profileId: tripsFilterId, start, end, language, pdiAuth });
-          const tripGroups = Array.isArray(tripsPayload) ? tripsPayload : [tripsPayload];
+          const tripGroups = filterTripGroupsBySelectedDate(
+            Array.isArray(tripsPayload) ? tripsPayload : [tripsPayload],
+            start
+          );
           const baseTrips = tripGroups.flatMap(g => (Array.isArray(g?.trips) ? g.trips : []));
 
           // 2) Drilldown per tripId -> /api/Trips/{id}
@@ -122,7 +125,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           );
 
           // 3) Build workbook sheets (base + drilldown sheets)
-          const sheets = buildWorkbookSheets(tripGroups, drilldownByTripId, deliveryEventDetails);
+          const sheets = buildWorkbookSheets(tripGroups, drilldownByTripId, deliveryEventDetails, start);
 
           const filenameParts = ["pdi_trips"];
           if (regionId) filenameParts.push(`region_${String(regionId).replace(/[^a-zA-Z0-9_-]/g, "_")}`);
@@ -217,6 +220,37 @@ async function apiFetchTripEventDetail({ tripId, eventId, pdiAuth }) {
   return res.json();
 }
 
+function filterTripGroupsBySelectedDate(groups, selectedDate) {
+  const targetDate = formatDateOnly(selectedDate);
+  if (!targetDate) return Array.isArray(groups) ? groups : [];
+
+  return (Array.isArray(groups) ? groups : [])
+    .map(group => {
+      const trips = (Array.isArray(group?.trips) ? group.trips : [])
+        .filter(trip => tripMatchesDate(trip, targetDate));
+      const drivers = (Array.isArray(group?.drivers) ? group.drivers : [])
+        .filter(driver => dateValueMatches(driver?.start, targetDate) || dateValueMatches(driver?.end, targetDate));
+
+      return {
+        ...group,
+        trips,
+        drivers
+      };
+    })
+    .filter(group => group.trips.length > 0 || group.drivers.length > 0);
+}
+
+function tripMatchesDate(trip, targetDate) {
+  if (dateValueMatches(trip?.start, targetDate) || dateValueMatches(trip?.end, targetDate)) return true;
+
+  const events = Array.isArray(trip?.events) ? trip.events : [];
+  return events.some(ev => dateValueMatches(ev?.start, targetDate) || dateValueMatches(ev?.end, targetDate));
+}
+
+function dateValueMatches(value, targetDate) {
+  return !!targetDate && formatDateOnly(value) === targetDate;
+}
+
 // Generic concurrency limiter
 async function parallelLimit(items, concurrency, worker) {
   const list = Array.isArray(items) ? items : [];
@@ -233,8 +267,9 @@ async function parallelLimit(items, concurrency, worker) {
   await Promise.all(runners);
 }
 
-function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
+function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails, selectedDate) {
   const payloads = Array.isArray(groups) ? groups : [groups];
+  const targetDate = formatDateOnly(selectedDate);
 
   // Base sheets
   const unitRows = [];
@@ -256,7 +291,11 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
       allTrips.push(t);
 
       const evs = Array.isArray(t?.events) ? t.events : [];
-      for (const ev of evs) eventRows.push(flattenTripEvent(t, ev));
+      for (const ev of evs) {
+        if (!targetDate || dateValueMatches(ev?.start, targetDate) || dateValueMatches(ev?.end, targetDate)) {
+          eventRows.push(flattenTripEvent(t, ev));
+        }
+      }
 
       const ords = Array.isArray(t?.orders) ? t.orders : [];
       for (const o of ords) orderRows.push(flattenTripOrder(t, o));
@@ -335,6 +374,7 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
 
     const orders = Array.isArray(detail?.orders) ? detail.orders : [];
     for (const o of orders) {
+      const customerStorageNumberById = mapCustomerStorageNumbers(o);
       const ev =
         deliveryByRef.get(String(o?.referenceNumber ?? "")) ||
         deliveryByRef.get(String(o?.id ?? "")) ||
@@ -346,28 +386,32 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
       const tripEventStart = Array.isArray(t?.events) ? t.events?.[0]?.start : "";
       const tripEventEnd = Array.isArray(t?.events) ? t.events?.[0]?.end : "";
       const eventStart =
-        tripEventStart ||
         evDetail?.actualStart ||
         evDetail?.plannedStart ||
         ev?.start ||
+        tripEventStart ||
         detail?.start ||
         tripStart ||
         "";
       const eventEnd =
-        tripEventEnd ||
         evDetail?.actualEnd ||
         evDetail?.plannedEnd ||
         ev?.end ||
+        tripEventEnd ||
         detail?.end ||
         tripEnd ||
         "";
-      const deliveryDate = formatDateOnly(tripStart || eventStart);
-      const amPm = formatAmPm(tripStart || eventStart);
+      const deliveryDate = formatDateOnly(eventStart || tripStart);
+      if (targetDate && deliveryDate !== targetDate) continue;
+
+      const amPm = formatAmPm(eventStart || tripStart);
       const deliveryOrder = tripOrderById.get(String(t?.id ?? t?.tripId ?? "")) ?? "";
 
       const positions = Array.isArray(o?.orderPositions) ? o.orderPositions : [];
       for (const p of positions) {
         const comps = Array.isArray(p?.compartments) ? p.compartments : [];
+        const customerStorageId = p?.customerStorageId ?? "";
+        const customerStorageTankNumber = customerStorageNumberById.get(String(customerStorageId)) ?? "";
 
         const loadPointId = p?.loadingPointID ?? o?.loadingPointID ?? o?.loadingPointId ?? "";
         const tripLoad = (loadPointId != null && loadPointId !== "")
@@ -420,6 +464,8 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
             deliveryOrder,
             dropSequence: ev?.sequenceNumber ?? "",
             customerNumber: o?.customerNumber ?? "",
+            customerStorageId,
+            customerStorageTankNumber,
             customerAddress: formatAddress(evDetail) || o?.address || o?.street || o?.zip || "",
             truckId: tractor?.number ?? tractor?.id ?? "",
             trailerId,
@@ -488,9 +534,27 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
 
     // Orders -> orderPositions -> compartments mapping (delivery allocation)
     for (const o of orders) {
+      const customerStorageNumberById = mapCustomerStorageNumbers(o);
+      const ev =
+        deliveryByRef.get(String(o?.referenceNumber ?? "")) ||
+        deliveryByRef.get(String(o?.id ?? "")) ||
+        (o?.customerId != null ? deliveryByCustomer.get(String(o.customerId)) : undefined);
+      const evDetail = ev?.id != null ? deliveryDetailByEventId.get(String(ev.id)) : undefined;
+      const eventStart =
+        evDetail?.actualStart ||
+        evDetail?.plannedStart ||
+        ev?.start ||
+        detail?.start ||
+        t?.start ||
+        "";
+      const deliveryDate = formatDateOnly(eventStart);
+      if (targetDate && deliveryDate !== targetDate) continue;
+
       const positions = Array.isArray(o?.orderPositions) ? o.orderPositions : [];
       for (const p of positions) {
         const comps = Array.isArray(p?.compartments) ? p.compartments : [];
+        const customerStorageId = p?.customerStorageId ?? "";
+        const customerStorageTankNumber = customerStorageNumberById.get(String(customerStorageId)) ?? "";
         for (const oc of comps) {
           orderPositionCompartmentRows.push({
             tripId: detail?.tripId ?? t?.id ?? "",
@@ -507,6 +571,8 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails) {
             articleName: p?.articleName ?? "",
             productId: p?.productId ?? "",
             orderedQuantityL: p?.quantity ?? "",
+            customerStorageId,
+            customerStorageTankNumber,
 
             unitCompartmentId: oc?.unitCompartmentId ?? "",
             compartmentNumber: oc?.compartmentNumber ?? "",
@@ -579,6 +645,26 @@ function formatAddress(evDetail) {
   if (evDetail?.city) parts.push(evDetail.city);
   if (evDetail?.zip) parts.push(evDetail.zip);
   return parts.join(", ");
+}
+
+function mapCustomerStorageNumbers(order) {
+  const byId = new Map();
+  const stack = Array.isArray(order?.customerStorages) ? [...order.customerStorages] : [];
+
+  while (stack.length > 0) {
+    const storage = stack.pop();
+    if (!storage) continue;
+
+    if (storage?.id != null) {
+      byId.set(String(storage.id), storage?.number ?? "");
+    }
+
+    if (Array.isArray(storage?.children)) {
+      stack.push(...storage.children);
+    }
+  }
+
+  return byId;
 }
 
 function computeTripOrderById(trips) {
