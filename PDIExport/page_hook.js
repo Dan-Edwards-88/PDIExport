@@ -141,7 +141,7 @@
         return;
       }
 
-      await fetch(`${ALLOWED_API_ORIGIN}/api/Orders/GetThirdPartyOrdersDashboardData`, {
+      await fetch(`${ALLOWED_API_ORIGIN}/api/Options/Order`, {
         method: "GET",
         headers: {
           "accept": "application/json, text/plain, */*",

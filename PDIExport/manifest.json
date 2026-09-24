@@ -3,6 +3,7 @@
       "service_worker": "background.js"
    },
    "content_scripts": [ {
+      "all_frames": true,
       "js": [ "content.js" ],
       "matches": [ "https://plc-mt.logistics.pdisoftware.com/*" ],
       "run_at": "document_start"
@@ -18,7 +19,7 @@
    "name": "PDI Trips Exporter",
    "permissions": [ "storage", "downloads" ],
    "update_url": "https://clients2.google.com/service/update2/crx",
-   "version": "1.0.6",
+   "version": "1.0.7",
    "web_accessible_resources": [ {
       "matches": [ "https://plc-mt.logistics.pdisoftware.com/*" ],
       "resources": [ "page_hook.js" ]
