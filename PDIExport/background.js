@@ -223,13 +223,14 @@ async function apiFetchTripEventDetail({ tripId, eventId, pdiAuth }) {
 function filterTripGroupsBySelectedDate(groups, selectedDate) {
   const targetDate = formatDateOnly(selectedDate);
   if (!targetDate) return Array.isArray(groups) ? groups : [];
+  const scheduleByTripId = buildTripScheduleById(groups);
 
   return (Array.isArray(groups) ? groups : [])
     .map(group => {
       const trips = (Array.isArray(group?.trips) ? group.trips : [])
-        .filter(trip => tripMatchesDate(trip, targetDate));
+        .filter(trip => scheduleByTripId.get(String(trip?.id ?? trip?.tripId ?? ""))?.date === targetDate);
       const drivers = (Array.isArray(group?.drivers) ? group.drivers : [])
-        .filter(driver => dateValueMatches(driver?.start, targetDate) || dateValueMatches(driver?.end, targetDate));
+        .filter(driver => formatDateOnly(driver?.start) === targetDate);
 
       return {
         ...group,
@@ -240,15 +241,28 @@ function filterTripGroupsBySelectedDate(groups, selectedDate) {
     .filter(group => group.trips.length > 0 || group.drivers.length > 0);
 }
 
-function tripMatchesDate(trip, targetDate) {
-  if (dateValueMatches(trip?.start, targetDate) || dateValueMatches(trip?.end, targetDate)) return true;
-
-  const events = Array.isArray(trip?.events) ? trip.events : [];
-  return events.some(ev => dateValueMatches(ev?.start, targetDate) || dateValueMatches(ev?.end, targetDate));
-}
-
-function dateValueMatches(value, targetDate) {
-  return !!targetDate && formatDateOnly(value) === targetDate;
+function buildTripScheduleById(groups) {
+  const scheduleByTripId = new Map();
+  for (const group of (Array.isArray(groups) ? groups : [])) {
+    const shiftsById = new Map();
+    for (const driver of (Array.isArray(group?.drivers) ? group.drivers : [])) {
+      if (driver?.scheduleEventID != null) shiftsById.set(String(driver.scheduleEventID), driver);
+    }
+    for (const trip of (Array.isArray(group?.trips) ? group.trips : [])) {
+      const shift = shiftsById.get(String(trip?.scheduleEventId));
+      // PDI's assigned shift owns the entire trip, including deliveries after
+      // noon or midnight. Delivery/actual timestamps must not reassign it.
+      const start = shift?.start || trip?.start;
+      const shiftLabel = shiftNumberToAmPm(shift?.shiftNumber);
+      scheduleByTripId.set(String(trip?.id ?? trip?.tripId ?? ""), {
+        date: formatDateOnly(start),
+        amPm: shiftLabel === "AM" || shiftLabel === "PM" ? shiftLabel : formatAmPm(start),
+        scheduleEventId: trip?.scheduleEventId ?? "",
+        unitCombinationId: trip?.unitCombinationId ?? group?.unitCombination?.id ?? ""
+      });
+    }
+  }
+  return scheduleByTripId;
 }
 
 // Generic concurrency limiter
@@ -268,8 +282,8 @@ async function parallelLimit(items, concurrency, worker) {
 }
 
 function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails, selectedDate) {
-  const payloads = Array.isArray(groups) ? groups : [groups];
-  const targetDate = formatDateOnly(selectedDate);
+  const payloads = filterTripGroupsBySelectedDate(Array.isArray(groups) ? groups : [groups], selectedDate);
+  const scheduleByTripId = buildTripScheduleById(payloads);
 
   // Base sheets
   const unitRows = [];
@@ -287,14 +301,12 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails, se
     if (Object.keys(unit).length > 0) unitRows.push(flattenUnitCombination(unit));
     for (const d of drivers) driverRows.push(flattenDriver(d));
     for (const t of trips) {
-      tripRows.push(flattenTrip(t, unit));
+      tripRows.push(flattenTrip(t, unit, scheduleByTripId.get(String(t?.id ?? t?.tripId ?? ""))));
       allTrips.push(t);
 
       const evs = Array.isArray(t?.events) ? t.events : [];
       for (const ev of evs) {
-        if (!targetDate || dateValueMatches(ev?.start, targetDate) || dateValueMatches(ev?.end, targetDate)) {
-          eventRows.push(flattenTripEvent(t, ev));
-        }
+        eventRows.push(flattenTripEvent(t, ev));
       }
 
       const ords = Array.isArray(t?.orders) ? t.orders : [];
@@ -304,7 +316,7 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails, se
 
   const deliveryRows = [];
 
-  const tripOrderById = computeTripOrderById(allTrips);
+  const tripOrderById = computeTripOrderById(allTrips, scheduleByTripId);
 
   // Drilldown sheets
   const tripCompartmentRows = [];
@@ -312,6 +324,7 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails, se
 
   for (const t of allTrips) {
     const tripKey = String(t?.id ?? t?.tripId ?? "");
+    const schedule = scheduleByTripId.get(tripKey);
     const detail = tripKey ? drilldownByTripId.get(tripKey) : undefined;
     if (!detail) continue;
 
@@ -401,10 +414,8 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails, se
         detail?.end ||
         tripEnd ||
         "";
-      const deliveryDate = formatDateOnly(eventStart || tripStart);
-      if (targetDate && deliveryDate !== targetDate) continue;
-
-      const amPm = formatAmPm(eventStart || tripStart);
+      const deliveryDate = schedule?.date ?? "";
+      const amPm = schedule?.amPm ?? "";
       const deliveryOrder = tripOrderById.get(String(t?.id ?? t?.tripId ?? "")) ?? "";
 
       const positions = Array.isArray(o?.orderPositions) ? o.orderPositions : [];
@@ -535,21 +546,6 @@ function buildWorkbookSheets(groups, drilldownByTripId, deliveryEventDetails, se
     // Orders -> orderPositions -> compartments mapping (delivery allocation)
     for (const o of orders) {
       const customerStorageNumberById = mapCustomerStorageNumbers(o);
-      const ev =
-        deliveryByRef.get(String(o?.referenceNumber ?? "")) ||
-        deliveryByRef.get(String(o?.id ?? "")) ||
-        (o?.customerId != null ? deliveryByCustomer.get(String(o.customerId)) : undefined);
-      const evDetail = ev?.id != null ? deliveryDetailByEventId.get(String(ev.id)) : undefined;
-      const eventStart =
-        evDetail?.actualStart ||
-        evDetail?.plannedStart ||
-        ev?.start ||
-        detail?.start ||
-        t?.start ||
-        "";
-      const deliveryDate = formatDateOnly(eventStart);
-      if (targetDate && deliveryDate !== targetDate) continue;
-
       const positions = Array.isArray(o?.orderPositions) ? o.orderPositions : [];
       for (const p of positions) {
         const comps = Array.isArray(p?.compartments) ? p.compartments : [];
@@ -667,14 +663,17 @@ function mapCustomerStorageNumbers(order) {
   return byId;
 }
 
-function computeTripOrderById(trips) {
+function computeTripOrderById(trips, scheduleByTripId) {
   const orderById = new Map();
   const groups = new Map();
 
   trips.forEach((t, idx) => {
-    const unitId = String(t?.unitCombinationId ?? "");
-    const amPm = tripAmPm(t);
-    const groupKey = `${unitId}:${amPm}`;
+    const schedule = scheduleByTripId.get(String(t?.id ?? t?.tripId ?? ""));
+    const groupKey = JSON.stringify([
+      schedule?.unitCombinationId ?? t?.unitCombinationId ?? "",
+      schedule?.date ?? "",
+      schedule?.scheduleEventId || schedule?.amPm || ""
+    ]);
     if (!groups.has(groupKey)) groups.set(groupKey, []);
     groups.get(groupKey).push({ trip: t, idx });
   });
@@ -695,7 +694,7 @@ function computeTripOrderById(trips) {
         return a.idx - b.idx; // response order fallback
       });
 
-    const ordered = [firstEntry, ...middle, lastEntry].filter(Boolean);
+    const ordered = [...new Set([firstEntry, ...middle, lastEntry].filter(Boolean))];
     ordered.forEach((entry, i) => {
       const t = entry.trip;
       const tripKey = String(t?.id ?? t?.tripId ?? "");
@@ -724,13 +723,6 @@ function firstDeliveryTime(trip) {
 function tripStartTime(trip) {
   const t = new Date(trip?.start || "").getTime();
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
-}
-
-function tripAmPm(trip) {
-  const time = firstDeliveryTime(trip) ?? tripStartTime(trip);
-  if (!Number.isFinite(time)) return "";
-  const d = new Date(time);
-  return d.getHours() >= 12 ? "PM" : "AM";
 }
 
 function earliestFlagged(list, flag) {
@@ -787,7 +779,7 @@ function flattenDriver(d) {
   };
 }
 
-function flattenTrip(t, unit) {
+function flattenTrip(t, unit, schedule) {
   return {
     tripId: t?.id ?? "",
     reference: t?.reference ?? "",
@@ -800,6 +792,8 @@ function flattenTrip(t, unit) {
 
     start: t?.start ?? "",
     end: t?.end ?? "",
+    scheduleDate: schedule?.date ?? "",
+    amPm: schedule?.amPm ?? "",
 
     plannedVolumeL: t?.plannedVolume ?? "",
     maxVolumeL: t?.maxVolume ?? "",
